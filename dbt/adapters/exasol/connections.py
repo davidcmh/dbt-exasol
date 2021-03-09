@@ -5,6 +5,8 @@ import dbt.exceptions
 from dbt.adapters.base import Credentials
 from dbt.adapters.sql import SQLConnectionManager
 from dbt.logger import GLOBAL_LOGGER as logger
+from dbt.contracts.connection import AdapterResponse
+from typing import Optional
 
 import pyexasol
 from pyexasol import ExaStatement, ExaConnection
@@ -20,6 +22,11 @@ def connect(**kwargs):
 class DB2Connection(ExaConnection):
     def cursor(self):
         return ExasolCursor(self)
+
+
+@dataclass
+class ExasolAdapterResponse(AdapterResponse):
+    execution_time: Optional[float] = None
 
 
 @dataclass
@@ -52,7 +59,7 @@ class ExasolConnectionManager(SQLConnectionManager):
             yield
 
         except Exception as e:
-            logger.debug("Error running SQL: %s", sql)
+            logger.debug("Error running SQL: {}".format(sql))
             logger.debug("Rolling back transaction.")
             self.release()
             if isinstance(e, dbt.exceptions.RuntimeException):
@@ -76,7 +83,7 @@ class ExasolConnectionManager(SQLConnectionManager):
             connection.state = 'open'
 
         except Exception as e:
-            logger.debug("Got an error when attempting to open a postgres "
+            logger.debug("Got an error when attempting to open an Exasol "
                          "connection: '{}'"
                          .format(e))
 
@@ -90,7 +97,7 @@ class ExasolConnectionManager(SQLConnectionManager):
     def commit(self):
         connection = self.get_thread_connection()
         if dbt.flags.STRICT_MODE:
-            assert isinstance(connection, Connection)
+            assert isinstance(connection, ExaConnection)
 
         logger.debug('On {}: COMMIT'.format(connection.name))
         self.add_commit_query()
@@ -103,7 +110,7 @@ class ExasolConnectionManager(SQLConnectionManager):
         connection = self.get_thread_connection()
 
         if dbt.flags.STRICT_MODE:
-            assert isinstance(connection, Connection)
+            assert isinstance(connection, ExaConnection)
 
         if connection.transaction_open is True:
             raise dbt.exceptions.InternalException(
@@ -116,6 +123,14 @@ class ExasolConnectionManager(SQLConnectionManager):
     def cancel(self, connection):
         connection_name = connection.name
         connection.abort_query()
+
+    @classmethod
+    def get_response(cls, cursor) -> ExasolAdapterResponse:
+        return ExasolAdapterResponse(
+            _message='OK',
+            rows_affected=cursor.rowcount,
+            execution_time=cursor.execution_time,
+        )
 
     @classmethod
     def get_status(cls, cursor):
@@ -131,20 +146,18 @@ class ExasolConnectionManager(SQLConnectionManager):
         if auto_begin and connection.transaction_open is False:
             self.begin()
         logger.debug(sql)
-        logger.debug('Using {} connection "{}".'
-                     .format(self.TYPE, connection.name))
+        logger.debug('Using {} connection "{}".'.format(self.TYPE, connection.name))
 
         with self.exception_handler(sql):
             if abridge_sql_log:
-                logger.debug('On %s: %s....', connection.name, sql[0:512])
+                logger.debug('On {}: {}....'.format(connection.name, sql[0:512]))
             else:
-                logger.debug('On %s: %s', connection.name, sql)
+                logger.debug('On {}: {}'.format(connection.name, sql))
             pre = time.time()
 
             cursor = connection.handle.cursor().execute(sql)
 
-            logger.debug("SQL status: %s in %0.2f seconds",
-                         self.get_status(cursor), (time.time() - pre))
+            logger.debug("SQL status: {} in {:.2f} seconds".format(self.get_status(cursor), (time.time() - pre)))
 
             return connection, cursor
 
@@ -206,6 +219,10 @@ class ExasolCursor(object):
     @property
     def rowcount(self):
         return self.stmt.rowcount()
+
+    @property
+    def execution_time(self):
+        return self.stmt.execution_time
 
     def close(self):
         self.stmt.close()
